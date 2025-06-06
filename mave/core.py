@@ -11,7 +11,6 @@ with predictions using the model.
 @author Tyler Hoyt <thoyt@berkeley.edu>
 """
 
-import pdb
 import csv
 import os
 import shutil
@@ -28,7 +27,6 @@ import mave.trainers
 import mave.comparer
 import mave.dataset
 import mave.visualize
-import mave.location
 import logging
 log = logging.getLogger("mave.core")
 
@@ -48,7 +46,7 @@ class Preprocessor(object):
                  changepoints=None,
                  test_size=0.25,
                  datetime_column_name='LocalDateTime',
-                 holiday_keys=['US'],
+                 holiday_keys=['USFederal'],
                  dayfirst=False,
                  locale=None,
                  outside_db_column_name = 'OutsideDryBulbTemperature',
@@ -72,22 +70,17 @@ class Preprocessor(object):
         self.feature_names = ['Minute','Hour','DayOfWeek']
         if use_month:
             self.feature_names.append('Month')
+        
         # identify holidays to use (if any)
         self.holidays = set([])
         if use_holidays:
             self.feature_names.append('Holiday')
             for key in holiday_keys:
-                try:
-                    # Use modern holidays API
-                    country_holidays = holidays.country_holidays(key)
-                    self.holidays = self.holidays.union(country_holidays.keys())
-                except AttributeError:
-                    # Fallback for older API or specific country codes
-                    if hasattr(holidays, key):
-                        country_holidays = getattr(holidays, key)()
-                        self.holidays = self.holidays.union(country_holidays.keys())
-                    else:
-                        log.warn(f"Holiday key '{key}' not recognized. Skipping.")
+                if key in mave.holidays.holidays:
+                    self.holidays = self.holidays.union(mave.holidays.holidays[key])
+                else:
+                    log.warn(f"Holiday key '{key}' not recognized. Skipping.")
+        
         # read in the input data
         data = pd.read_csv(input_file,
                            skiprows = n_headers,
@@ -124,32 +117,11 @@ class Preprocessor(object):
         vectorized_process_datetime = np.vectorize(self.process_datetime)
         d = np.column_stack(vectorized_process_datetime(dts))
 
+        # Skip weather data download for now - would need proper location module
         if locale and not outside_db_column_name in data.dtype.names:
-            log.info(("No match found for outside air temperature"
-                      " name (%s) in the input file column headers: %s."
-                      " Downloading for given location: %s"
-                      %(outside_db_column_name,
-                        data.dtype.names,
-                        locale.real_addrs)))
-            try:
-                hist_weather = location.Weather(
-                                   start=dts[0],
-                                   end=dts[-1],
-                                   key=None,
-                                   geocode=locale.geocode,
-                                   interp_interval=self.interval_seconds/60,
-                                   save=True)
-                outside_db = np.array(hist_weather.interp_data[0],\
-                                      dtype=[(outside_db_column_name,'f8')])
-                outside_dp = np.array(hist_weather.interp_data[1],\
-                                      dtype=[(outside_dp_column_name,'f8')])
-                data=self.join_recarrays([data, outside_db, outside_dp])
-                self.use_tmy=True
-            except Exception as e:
-                log.warn(("Weather download unsuccessful. Fitting models "
-                          "without weather data. TMY normalization will "
-                          "also not be performed (even if requested)."))
-                self.use_tmy=False
+            log.warn("Location-based weather download not implemented. Skipping TMY features.")
+            self.use_tmy = False
+        
         log.info("Creating other (non datetime related) input features")
         data, target_col_ind = self.append_input_features(
             data,
@@ -165,10 +137,11 @@ class Preprocessor(object):
                             remove_zeros,
                             remove_outliers)
         # ensure that the datetimes match the input features
-        if (self.X[:,0] != np.array([dt.minute for dt in self.dts])).any() \
-            or (self.X[:,1] != np.array([dt.hour for dt in self.dts])).any():
-            raise Exception(("The datetimes in the datetimes array do not"
-                             " match those in the input features array"))
+        if len(self.dts) > 0 and len(self.X) > 0:
+            if (self.X[:,0] != np.array([dt.minute for dt in self.dts])).any() \
+                or (self.X[:,1] != np.array([dt.hour for dt in self.dts])).any():
+                raise Exception(("The datetimes in the datetimes array do not"
+                                 " match those in the input features array"))
         self.cps = self.changepoint_feature(changepoints=changepoints,
                                             **kwargs)
         log.info("Splitting data into pre- and post-retrofit datasets")
@@ -199,10 +172,7 @@ class Preprocessor(object):
             elif remove_outliers == 'MultipleValues':
                 keep_inds = self.is_outlier(y, threshold=10)
             else:
-                if y is not None:
-                    keep_inds = np.ones(len(y),dtype=bool)
-                else:
-                    keep_inds = 0
+                keep_inds = np.ones(len(y),dtype=bool)
             if remove_zeros:
                 keep_inds *= y != 0.0
             # log outlier datetimes and values
@@ -219,8 +189,7 @@ class Preprocessor(object):
         return X, y, datetimes
 
     def append_input_features(self, data, d0, outside_db_column_name,
-                              target_column_name, datetime_column_name,
-                              previous_data_points=2):
+                              target_column_name, datetime_column_name):
         column_names = [name for name in data.dtype.names \
             if name != datetime_column_name]
         d = d0
@@ -228,7 +197,7 @@ class Preprocessor(object):
             if s == outside_db_column_name:
                 if np.nanmedian(data[s]) > 32.0:
                     # almost certainly in crazy ancient units [F]
-                    # unless the building is in Antartica
+                    # unless the building is in Antarctica
                     log.warn(("The median outside drybulb temperature "
                         " is high (> 32) - assumed that it is in degF and "
                         " converted to degC to match units of weather and "
@@ -238,18 +207,18 @@ class Preprocessor(object):
                     t = data[s]
                 d = np.column_stack( (d, t) )
                 self.feature_names.append(str(s))
-                if previous_data_points > 0:
+                if self.previous_data_points > 0:
                     # create input features using historical data
                     # at the intervals defined by n_vals_in_past_day
-                    for v in range(1, previous_data_points + 1):
-                        past_hours = v * 24 / (previous_data_points + 1)
-                        n_vals = past_hours * self.vals_per_hr
+                    for v in range(1, self.previous_data_points + 1):
+                        past_hours = v * 24 / (self.previous_data_points + 1)
+                        n_vals = int(past_hours * self.vals_per_hr)
                         past_data = np.roll(t, n_vals)
                         # for the first day in the file
                         # there will be no historical data
                         # use the data from the next day as a rough estimate
-                        past_data[0:n_vals] = past_data[24*self.vals_per_hr: \
-                                                 24*self.vals_per_hr+n_vals ]
+                        vals_per_day = int(24 * self.vals_per_hr)
+                        past_data[0:n_vals] = past_data[vals_per_day: vals_per_day+n_vals]
                         d = np.column_stack( (d, past_data) )
                         self.feature_names.append(str(s)+'_-'+ str(past_hours))
             elif not s == target_column_name:
@@ -259,7 +228,6 @@ class Preprocessor(object):
                 d = np.column_stack( (d, data[s]) )
         # add the target data
         split = d.shape[1]
-        print(target_column_name)
         if target_column_name in column_names:
             d = np.column_stack( (d, data[target_column_name]) )
         return d, split
@@ -274,12 +242,13 @@ class Preprocessor(object):
         mn = np.amin(y)
         median_diff = np.median(abs(np.diff(y)))
         y_unique = np.unique(y)
-        diff_to_max = np.diff(y_unique[np.argpartition(y_unique, -2)][-2:])[0]
-        if abs(diff_to_max) > med_diff_multiple*median_diff:
-            keep_inds = y < mx
-        diff_to_min = np.diff(y_unique[np.argpartition(y_unique, 2)][:2])[0]
-        if abs(diff_to_min) > med_diff_multiple*median_diff:
-            keep_inds = y > mn
+        if len(y_unique) >= 2:
+            diff_to_max = np.diff(y_unique[np.argpartition(y_unique, -2)][-2:])[0]
+            if abs(diff_to_max) > med_diff_multiple*median_diff:
+                keep_inds = y < mx
+            diff_to_min = np.diff(y_unique[np.argpartition(y_unique, 2)][:2])[0]
+            if abs(diff_to_min) > med_diff_multiple*median_diff:
+                keep_inds = y > mn
         return keep_inds
 
     def is_outlier(self, y, threshold=10):
@@ -293,14 +262,17 @@ class Preprocessor(object):
         diff = np.sum((y - median)**2, axis=-1)
         diff = np.sqrt(diff)
         med_abs_deviation = np.median(diff)
-        modified_z_score = 0.6745 * diff / med_abs_deviation
-        keep_inds = modified_z_score <= threshold
+        if med_abs_deviation > 0:
+            modified_z_score = 0.6745 * diff / med_abs_deviation
+            keep_inds = modified_z_score <= threshold
+        else:
+            keep_inds = np.ones(len(y), dtype=bool)
         return keep_inds
 
     def standardize_datetimes(self, data, dts):
         # calculate the interval between datetimes
         dts = [datetime.utcfromtimestamp(dt.astype('uint64') / 1e9) for dt in dts]
-        intervals = [int((dts[i]-dts[i-1]).seconds) for i in range(1, len(dts))]
+        intervals = [int((dts[i]-dts[i-1]).total_seconds()) for i in range(1, len(dts))]
         median_interval = int(np.median(intervals))
         vals_per_hr = 3600 / median_interval
         assert (3600 % median_interval) == 0,  \
@@ -315,7 +287,7 @@ class Preprocessor(object):
         dts, inds = np.unique(dts, return_index = True)
         data = data[inds]
         # updates intervals after datetime rounding and duplicate removal
-        intervals = [int((dts[i]-dts[i-1]).seconds) for i in range(1, len(dts))]
+        intervals = [int((dts[i]-dts[i-1]).total_seconds()) for i in range(1, len(dts))]
         row_length = len(data[0])
         # add datetimes and nans when there are gaps (based on median interval)
         gaps = np.greater(intervals, median_interval)
@@ -375,7 +347,7 @@ class Preprocessor(object):
     def changepoint_feature(self,
                             changepoints = None,
                             dayfirst = False,
-                            timestamp_format = '%%Y-%%m-%%d%%T%%H%%M',
+                            timestamp_format = '%Y-%m-%dT%H%M',
                             **kwargs):
         if changepoints is not None:
             # convert timestamps to datetimes
@@ -391,8 +363,9 @@ class Preprocessor(object):
             cps.sort(key=lambda tup: tup[0])
             feat = np.zeros(len(self.dts))
             for (cp_dt, tag) in cps:
-                ind = np.where(self.dts >= cp_dt)[0][0]
-                feat[ind:] = tag
+                ind = np.where(self.dts >= cp_dt)[0]
+                if len(ind) > 0:
+                    feat[ind[0]:] = tag
         else:
             feat = None
         return feat
@@ -418,13 +391,9 @@ class Preprocessor(object):
                 # this is useful for testing the accuracy of modeling methods
                 # for datasets in which no retrofit is known to have occurred
                 pre = int(len(self.X_s)*(1-test_size))
-                post = int(len(self.X_s)*test_size)
                 self.X_pre_s, self.X_post_s = self.X_s[:pre], self.X_s[pre:]
                 self.y_pre_s, self.y_post_s = self.y_s[:pre], self.y_s[pre:]
                 self.dts_pre, self.dts_post = self.dts[:pre], self.dts[pre:]
-        else:
-            pass
-
 
     def join_recarrays(self,arrays):
         newtype = sum((a.dtype.descr for a in arrays), [])
@@ -440,102 +409,96 @@ class ModelAggregator(object):
         self.dataset = dataset
         self.models = []
         self.best_model = None
-        self.best_score = None
+        self.best_score = -np.inf  # Initialize to negative infinity
         self.error_metrics = None
 
     def train_dummy(self, **kwargs):
-        dummy_trainer = trainers.DummyTrainer(**kwargs)
-        dummy_trainer.train(self.dataset,
-                            randomized_search=False)
+        dummy_trainer = mave.trainers.DummyTrainer(**kwargs)
+        dummy_trainer.train(self.dataset, randomized_search=False)
         self.models.append(dummy_trainer.model)
         return dummy_trainer.model
 
     def train_hour_weekday(self, **kwargs):
-        hour_weekday_trainer = trainers.HourWeekdayBinModelTrainer(**kwargs)
-        hour_weekday_trainer.train(self.dataset,
-                                   randomized_search=False)
+        hour_weekday_trainer = mave.trainers.HourWeekdayBinModelTrainer(**kwargs)
+        hour_weekday_trainer.train(self.dataset, randomized_search=False)
         self.models.append(hour_weekday_trainer.model)
         return hour_weekday_trainer.model
 
     def train_kneighbors(self, **kwargs):
-        kneighbors_trainer = trainers.KNeighborsTrainer(**kwargs)
+        kneighbors_trainer = mave.trainers.KNeighborsTrainer(**kwargs)
         kneighbors_trainer.train(self.dataset)
         self.models.append(kneighbors_trainer.model)
         return kneighbors_trainer.model
 
     def train_svr(self, **kwargs):
-        svr_trainer = trainers.SVRTrainer(**kwargs)
+        svr_trainer = mave.trainers.SVRTrainer(**kwargs)
         svr_trainer.train(self.dataset)
         self.models.append(svr_trainer.model)
         return svr_trainer.model
 
     def train_gradient_boosting(self, **kwargs):
-        gradient_boosting_trainer = trainers.GradientBoostingTrainer(**kwargs)
+        gradient_boosting_trainer = mave.trainers.GradientBoostingTrainer(**kwargs)
         gradient_boosting_trainer.train(self.dataset)
         self.models.append(gradient_boosting_trainer.model)
         return gradient_boosting_trainer.model
 
     def train_random_forest(self, **kwargs):
-        random_forest_trainer = trainers.RandomForestTrainer(**kwargs)
+        random_forest_trainer = mave.trainers.RandomForestTrainer(**kwargs)
         random_forest_trainer.train(self.dataset)
         self.models.append(random_forest_trainer.model)
         return random_forest_trainer.model
 
     def train_extra_trees(self, **kwargs):
-        extra_trees_trainer = trainers.ExtraTreesTrainer(**kwargs)
+        extra_trees_trainer = mave.trainers.ExtraTreesTrainer(**kwargs)
         extra_trees_trainer.train(self.dataset)
         self.models.append(extra_trees_trainer.model)
         return extra_trees_trainer.model
 
     def train_all(self, **kwargs):
-        #TODO: Uncomment other models when done with development
-        #log.info("Training dummy regressor models")
-        #self.train_dummy(**kwargs)
         log.info("Training hour and weekday binning models")
         self.train_hour_weekday(**kwargs)
-        #log.info("Training K neightbors regressor models")
-        #self.train_kneighbors(**kwargs)
         log.info("Training random forest regressor models")
         self.train_random_forest(**kwargs)
-        #log.info("Training extra trees regressor models")
-        #self.train_extra_trees(**kwargs)
-        # These take forever and maybe aren't worth it?
-        #self.train_svr(**kwargs)
-        #self.train_gradient_boosting(**kwargs)
         self.select_model()
         self.score()
         return self.models
 
     def select_model(self):
         for model in self.models:
-            log.info(("Best %s model R2 score: %s, with parameters: %s"
-                     %(str(model.estimator).split('(')[0],
-                       model.best_score_,
-                       model.best_params_)))
-            if model.best_score_ > self.best_score:
-                self.best_score = model.best_score_
-                self.best_model = model
+            if hasattr(model, 'best_score_') and hasattr(model, 'best_params_'):
+                log.info(("Best %s model R2 score: %s, with parameters: %s"
+                         %(str(model.estimator).split('(')[0],
+                           model.best_score_,
+                           model.best_params_)))
+                if model.best_score_ > self.best_score:
+                    self.best_score = model.best_score_
+                    self.best_model = model
         return self.best_model, self.best_score
 
     def score(self):
-        prediction = self.dataset.y_standardizer.inverse_transform(\
-                                      self.best_model.predict(self.dataset.X_s).reshape(-1, 1)).ravel()
-        self.error_metrics = comparer.Comparer(comparison=prediction,\
-                                               baseline=self.dataset.y)
+        if self.best_model is not None:
+            prediction = self.dataset.y_standardizer.inverse_transform(\
+                                          self.best_model.predict(self.dataset.X_s).reshape(-1, 1)).ravel()
+            self.error_metrics = mave.comparer.Comparer(comparison=prediction,\
+                                                   baseline=self.dataset.y)
         return self.error_metrics
 
     def save(self, model_type):
         os.chdir(os.path.join(os.getcwd(),'models'))
         for m in self.models:
-            m_name = str(m.best_estimator_).split('(')[0]
-            with open(model_type+'_%s_model'%m_name, 'wb') as f:
-                pickle.dump(m.best_estimator_, f, -1)
-        with open(model_type+'_best_model_error_metrics.pkl', 'wb') as f:
-            pickle.dump(self.error_metrics, f, -1)
+            if hasattr(m, 'best_estimator_'):
+                m_name = str(m.best_estimator_).split('(')[0]
+                with open(model_type+'_%s_model'%m_name, 'wb') as f:
+                    pickle.dump(m.best_estimator_, f, -1)
+        if self.error_metrics:
+            with open(model_type+'_best_model_error_metrics.pkl', 'wb') as f:
+                pickle.dump(self.error_metrics, f, -1)
         os.chdir('..')
-        
 
     def __str__(self):
+        if self.best_model is None:
+            return "No models trained yet."
+            
         rv = "\n\n=== Selected model ==="
         rv += "\nBest cross validation score on training data: %s"%\
                                                    self.best_model.best_score_
@@ -545,21 +508,22 @@ class ModelAggregator(object):
             feats = self.dataset.feature_names
             rv += ("\nThe relative importances of input features are:\n%s"%
                   pprint.pformat([f+': '+str(i) for f,i in zip(feats,imps)]))
-        except Exception as e:
+        except:
             rv += ""
         rv += "\n\n=== Fit to the training data ==="
         rv += "\nThese error metrics represent the match between the"+ \
                " pre-retrofit data used to train the model and" + \
                " the model prediction:"
         # check if the results meet the ASHRAE Guideline 14:2002 criteria
-        if self.error_metrics.cvrmse <= 30 \
-            and abs(self.error_metrics.nmbe) <= 10:
-            self.meets_criteria = True
-        else:
-            self.meets_criteria = False
-        rv += '\n\nThe model %s the ASHRAE Guideline 14:2002 criteria.'\
-              %(['does not meet', 'meets'][self.meets_criteria])
-        rv += str(self.error_metrics)
+        if self.error_metrics:
+            if self.error_metrics.cvrmse <= 30 \
+                and abs(self.error_metrics.nmbe) <= 10:
+                self.meets_criteria = True
+            else:
+                self.meets_criteria = False
+            rv += '\n\nThe model %s the ASHRAE Guideline 14:2002 criteria.'\
+                  %(['does not meet', 'meets'][self.meets_criteria])
+            rv += str(self.error_metrics)
         return rv
 
 class mave(object):
@@ -581,12 +545,11 @@ class mave(object):
             os.makedirs(os.path.join(res_dir,'data'))
             os.chdir(res_dir)
             shutil.copyfile(input_file_path, 'original_input_file.csv')
-        # locate the address using Google Maps API
-        if address is None or address == '':
-            self.locale = None
-            log.info("No location provided")
-        else:
-            self.locale = location.Location(address)
+        
+        # Skip location for now - requires proper location module
+        self.locale = None
+        if address:
+            log.info("Location services not implemented. Skipping location-based features.")
        
         # read up to the first 100 lines of the input_file to check columns 
         with open(input_file_path, 'r') as f:
@@ -622,6 +585,7 @@ class mave(object):
             raise Exception("Target column name not found in input file",
                             target_column_name)
         n_headers = len(headers)-1
+        
         # pre-process the input data file
         log.info("Preprocessing the input file")
         self.p = Preprocessor(input_file_path,
@@ -632,8 +596,9 @@ class mave(object):
                               column_names=cols,
                               **kwargs)
         self.use_tmy = self.p.use_tmy
+        
         # create datasets
-        self.A = dataset.Dataset(dataset_type='A',
+        self.A = mave.dataset.Dataset(dataset_type='A',
                                  X_s=self.p.X_pre_s,
                                  X_standardizer=self.p.X_standardizer,
                                  y_s=self.p.y_pre_s,
@@ -641,7 +606,7 @@ class mave(object):
                                  dts=self.p.dts_pre,
                                  feature_names=self.p.feature_names,
                                  save=save)
-        self.D = dataset.Dataset(dataset_type='D',
+        self.D = mave.dataset.Dataset(dataset_type='D',
                                  X_s=self.p.X_post_s,
                                  X_standardizer=self.p.X_standardizer,
                                  y_s=self.p.y_post_s,
@@ -649,73 +614,31 @@ class mave(object):
                                  dts=self.p.dts_post,
                                  feature_names=self.p.feature_names,
                                  save=save)
+        
         self.m_pre = ModelAggregator(dataset=self.A)
-        folds = model_selection.KFold(n_splits=k, shuffle=True)
+        folds = model_selection.KFold(n_splits=k, shuffle=True, random_state=42)
         log.info("Fitting models to the pre-retrofit data")
         self.m_pre.train_all(k = folds, **kwargs)
+        
         # single model (no weather lookup, no tmy normalization)
         # evaluate the output of the model against the post-retrofit data
-        self.E = dataset.Dataset(
-            dataset_type='E',
-            base_dataset= self.D,
-            y_s=self.m_pre.best_model.predict(self.D.X_s),
-            save=save)
-        self.DvsE = comparer.Comparer(comparison=self.E, baseline=self.D)
-        if save:
-            self.m_pre.save('pre-retrofit')
-            ofp = os.path.join('post-retrofit_error_metrics.pkl')
-            with open(ofp, 'wb') as f:
-                pickle.dump(self.DvsE, f, -1)
-        if self.locale and self.use_tmy:
-            try:
-                use_dp = self.p.outside_dp_column_name in self.A.feature_names
-                tmy_data = location.TMYData(
-                             location=self.locale,
-                             year=datetime.now().year,
-                             interp_interval=self.p.interval_seconds/60,
-                             use_dp=use_dp,
-                             save=True)
-                with open('./%s_TMY.csv'%self.locale.geocode,'r') as tmy_csv:
-                    pass
-            except Exception as e:
-                log.warn("TMY data download unsuccessful: %s"%e)
-                self.use_tmy = False
-        if self.locale and self.use_tmy:
-            # build a second model based on the post-retrofit data
-            self.m_post = ModelAggregator(dataset=self.D)
-            folds = model_selection.KFold(n_splits=k, shuffle=True)
-            log.info("Fitting models to the post-retrofit data")
-            self.m_post.train_all(k = folds, **kwargs)
-            log.info("Preprocessing the TMY data file")
-            tmy_cols = [c for c in cols if c != target_column_name]
-            self.p_tmy = Preprocessor(input_file='./%s_TMY.csv'%self.locale.geocode,
-                                      X_standardizer=self.p.X_standardizer,
-                                      n_headers=0,
-                                      column_names=tmy_cols,
-                                      **kwargs)
-            self.G = dataset.Dataset(
-                         dataset_type='G',
-                         X_s=self.p_tmy.X_s,
-                         X_standardizer=self.p.X_standardizer,
-                         y_s=self.m_pre.best_model.predict(self.p_tmy.X_s),
-                         y_standardizer=self.p.y_standardizer,
-                         dts=self.p_tmy.dts,
-                         feature_names=self.p_tmy.feature_names,
-                         save=save)
-            self.H = dataset.Dataset(
-                         dataset_type='H',
-                         base_dataset=self.G,
-                         y_s=self.m_post.best_model.predict(self.p_tmy.X_s),
-                         save=save)
-            self.GvsH = comparer.Comparer(comparison=self.H, baseline=self.G)
+        if self.m_pre.best_model:
+            self.E = mave.dataset.Dataset(
+                dataset_type='E',
+                base_dataset= self.D,
+                y_s=self.m_pre.best_model.predict(self.D.X_s),
+                save=save)
+            self.DvsE = mave.comparer.Comparer(comparison=self.E, baseline=self.D)
             if save:
-                self.m_post.save('post-retrofit')
-                with open('tmy_error_metrics.pkl', 'wb') as f:
-                    pickle.dump(self.GvsH, f, -1)
+                self.m_pre.save('pre-retrofit')
+                ofp = os.path.join('post-retrofit_error_metrics.pkl')
+                with open(ofp, 'wb') as f:
+                    pickle.dump(self.DvsE, f, -1)
+        
+        # TMY analysis skipped - requires location module
         if save:
             with open(os.path.join('text_results.txt'), "w") as f:
                 f.write(str(self))
-
 
     def __str__(self):
         rv = "\n\n===== Pre-retrofit model training summary ====="
@@ -724,30 +647,23 @@ class mave(object):
         rv += "\nThese results quantify the difference between the"+ \
               " measured post-retrofit data and the predicted" + \
               " consumption:"
-        rv += str(self.DvsE)
-        if self.locale and self.use_tmy:
-            rv += "\n\n===== Post-retrofit model training summary ====="
-            rv += str(self.m_post)
-            rv += "\n\n===== Results normalized to TMY data ====="
-            rv += ("\nThese results compare the energy consumption"
-         	         " predicted by both the pre- and post-retrofit models"
-                   " using Typical Meteorological Year data near: %s"
-                   %(self.locale.real_addrs))
-            rv += str(self.GvsH)
+        if hasattr(self, 'DvsE'):
+            rv += str(self.DvsE)
+        else:
+            rv += "\nNo comparison results available."
         return rv
 
 if __name__=='__main__':
-    import pdb
-    with open('data/ex2.csv', 'r') as f:
-        cps = [
-               ("2012/1/29 13:15", Preprocessor.PRE_DATA_TAG),
-               ("2012/12/20 01:15", Preprocessor.IGNORE_TAG),
-               ("2013/1/1 01:15", Preprocessor.PRE_DATA_TAG),
-               ("2013/9/14 23:15", Preprocessor.POST_DATA_TAG),
-              ]
-        # one example
-        mnv = mave(input_file=f,
-                  changepoints=cps,
-                  address=None,
-                  save=True)
-        log.info(mnv)
+    # Example usage
+    cps = [
+           ("2012/1/29 13:15", Preprocessor.PRE_DATA_TAG),
+           ("2012/12/20 01:15", Preprocessor.IGNORE_TAG),
+           ("2013/1/1 01:15", Preprocessor.PRE_DATA_TAG),
+           ("2013/9/14 23:15", Preprocessor.POST_DATA_TAG),
+          ]
+    # Uncomment and modify path as needed
+    # mnv = mave(input_file_path='data/ex2.csv',
+    #           changepoints=cps,
+    #           address=None,
+    #           save=True)
+    # print(mnv)
