@@ -1,6 +1,6 @@
 import numpy as np
 from sklearn.dummy import DummyRegressor
-from sklearn.neighbors.kde import KernelDensity
+from sklearn.neighbors import KernelDensity
 
 def normalize(x):
     # normalize numpy array to [0, 1]
@@ -74,5 +74,5 @@ class HourWeekdayBinModel(DummyRegressor):
         weekdays = np.copy(X[:, 2])
         hours = 23 * normalize(hours)
         weekdays = 6 * normalize(weekdays)
-        prediction = map(lambda x: self._model[x[0], x[1]],zip(hours, weekdays))
+        prediction = list(map(lambda x: self._model[x[0], x[1]], zip(hours, weekdays)))
         return np.array(prediction)

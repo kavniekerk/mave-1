@@ -1,3 +1,4 @@
+# bin/mave-tmy
 #!/usr/bin/env python
 """
 Returns a csv file containing typical meteorological data
@@ -51,4 +52,3 @@ if __name__=='__main__':
                      help="interval (in minutes) for interpolation")
     args = prs.parse_args()  
     main(**args.__dict__)
-

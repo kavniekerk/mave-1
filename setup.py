@@ -1,3 +1,6 @@
+# Key changes needed for Python 2 to Python 3 conversion:
+
+## 1. setup.py - Updated Python version and fixed syntax
 """A setuptools based setup module.
 
 See:
@@ -58,8 +61,14 @@ setup(
 
         # Specify the Python versions you support here. In particular, ensure
         # that you indicate whether you support Python 2, Python 3 or both.
-        'Programming Language :: Python ',
-        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
     ],
 
     # What does your project relate to?
@@ -74,11 +83,11 @@ setup(
     # requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
     install_requires = [
-        'pandas>=0.18.0',
-        'numpy>=1.9.0',
-        'python-dateutil>=2.4',
-        'scikit-learn>=0.17',
-        'scipy>=0.15.0'
+        'pandas>=1.0.0',
+        'numpy>=1.17.0',
+        'python-dateutil>=2.8.0',
+        'scikit-learn>=0.22.0',
+        'scipy>=1.3.0'
     ],
 
     # List additional groups of dependencies here (e.g. development
@@ -104,7 +113,9 @@ setup(
         'bin/mave',
         'bin/mave-tmy',
         'bin/mave-weather'
-    ]
+    ],  # Fixed missing comma
+
+    python_requires='>=3.6',  # Added Python version requirement
 
     # Although 'package_data' is the preferred approach, in some case you may
     # need to place data files outside of your packages. See:

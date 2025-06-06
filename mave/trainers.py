@@ -1,9 +1,8 @@
 import numpy as np
 import pdb
-import estimators
+from . import estimators
 from scipy.stats import randint as sp_randint
-from sklearn import cross_validation, svm, grid_search, \
-        ensemble, neighbors, dummy
+from sklearn import model_selection, svm, ensemble, neighbors, dummy
 
 class ModelTrainer(object):
 
@@ -11,7 +10,7 @@ class ModelTrainer(object):
                  search_iterations=20, 
                  n_jobs=-1, 
                  k=10, 
-                 verbose= False, 
+                 verbose=False, 
                  **kwargs):
         self.search_iterations = search_iterations
         self.n_jobs = n_jobs
@@ -21,7 +20,7 @@ class ModelTrainer(object):
     def train(self, dataset, randomized_search=True):
         # using a random grid search assessed using k-fold cross validation
         if randomized_search:
-            self.model = grid_search.RandomizedSearchCV(
+            self.model = model_selection.RandomizedSearchCV(
                                      self.model, 
                                      param_distributions=self.params,
                                      n_iter=self.search_iterations,
@@ -30,7 +29,7 @@ class ModelTrainer(object):
                                      verbose=self.verbose)
         # otherwise do an exhaustive grid search
         else:
-            self.model = grid_search.GridSearchCV(
+            self.model = model_selection.GridSearchCV(
                                      self.model, 
                                      param_grid=self.params,
                                      n_jobs=self.n_jobs,
@@ -45,41 +44,41 @@ class DummyTrainer(ModelTrainer):
     model = dummy.DummyRegressor()
 
     def __init__(self, **kwargs):
-        super(DummyTrainer, self).__init__(**kwargs) 
+        super().__init__(**kwargs) 
 
 class HourWeekdayBinModelTrainer(ModelTrainer): 
     params = {"strategy": ['mean', 'median']}
     model = estimators.HourWeekdayBinModel()
 
     def __init__(self, **kwargs):
-        super(HourWeekdayBinModelTrainer, self).__init__(**kwargs) 
+        super().__init__(**kwargs) 
 
 class KNeighborsTrainer(ModelTrainer):
     params = {
-                "p": [1,2],
+                "p": [1, 2],
                 "n_neighbors": sp_randint(6, 40),
                 "leaf_size": np.logspace(1, 2.5, 1000)
     }
     model = neighbors.KNeighborsRegressor()
 
     def __init__(self, **kwargs):
-        super(KNeighborsTrainer, self).__init__(**kwargs) 
+        super().__init__(**kwargs) 
 
 class SVRTrainer(ModelTrainer):
     params = {
                 "C": np.logspace(-3, 1, 1000),
                 "epsilon": np.logspace(-3, 0.5, 1000),
-                "degree": [2,3,4],
+                "degree": [2, 3, 4],
                 "gamma": np.logspace(-3, 2, 1000),
                 "max_iter": [20000]
     }
     model = svm.SVR()
 
     def __init__(self, **kwargs):
-        super(SVRTrainer, self).__init__(**kwargs) 
+        super().__init__(**kwargs) 
 
 class RandomForestTrainer(ModelTrainer):
-    #TODO: check the validity of max_features=4  
+    # TODO: check the validity of max_features=4  
     max_features = 4
     params = {
                 "max_depth": [4, 5, 6, 7, 8, 9, 10, None],
@@ -91,7 +90,7 @@ class RandomForestTrainer(ModelTrainer):
     model = ensemble.RandomForestRegressor()
 
     def __init__(self, **kwargs):
-        super(RandomForestTrainer, self).__init__(**kwargs) 
+        super().__init__(**kwargs) 
 
 class GradientBoostingTrainer(ModelTrainer):
     max_features = 4
@@ -107,7 +106,7 @@ class GradientBoostingTrainer(ModelTrainer):
     model = ensemble.GradientBoostingRegressor()
 
     def __init__(self, **kwargs):
-        super(GradientBoostingTrainer, self).__init__(**kwargs) 
+        super().__init__(**kwargs) 
 
 class ExtraTreesTrainer(ModelTrainer):
     max_features = 4
@@ -122,7 +121,7 @@ class ExtraTreesTrainer(ModelTrainer):
     model = ensemble.ExtraTreesRegressor()
 
     def __init__(self, **kwargs):
-        super(ExtraTreesTrainer, self).__init__(**kwargs) 
+        super().__init__(**kwargs) 
 
-if __name__=='__main__':
+if __name__ == '__main__':
     t = DummyTrainer()

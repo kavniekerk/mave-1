@@ -1,3 +1,4 @@
+# mave/holidays.py
 from datetime import date
 
 holidays = {
@@ -376,6 +377,5 @@ holidays = {
 
 if __name__ == '__main__':
     import pprint
-    print "These are the Good Friday dates from 1990-2020"
+    print("These are the Good Friday dates from 1990-2020")
     pprint.pprint(holidays['GoodFriday'])
-

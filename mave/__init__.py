@@ -1,1 +1,3 @@
-from _version import __version__
+# mave/__init__.py
+from ._version import __version__
+

@@ -1,3 +1,4 @@
+# bin/mave
 #!/usr/bin/env python
 """
 Building Energy Prediction
@@ -17,7 +18,7 @@ import os
 import sys
 import mave.core
 import argparse
-import ConfigParser
+import configparser
 import logging
 import pkg_resources
 import pprint
@@ -37,7 +38,7 @@ def main(input_file_path=None,
     log.info(("Assessing input file %s using mave version %s"
               %(args.input_file_path,mave.__version__)))
     kws ={}
-    config = ConfigParser.ConfigParser(allow_no_value=True)
+    config = configparser.ConfigParser(allow_no_value=True)
     if config_file: 
         try:
             if not os.path.isfile(config_file): raise Exception
@@ -50,7 +51,7 @@ def main(input_file_path=None,
         log.info('No config file entered - Using default settings') 
         resource_path = os.path.join('config', 'default.cfg')
         default = pkg_resources.resource_string('mave', resource_path)
-        config.readfp(io.BytesIO(default))
+        config.read_string(default.decode('utf-8'))
     for name in config.options('Booleans'):
         kws[name] = config.getboolean('Booleans', name)
     for name in config.options('Integers'):
@@ -64,7 +65,7 @@ def main(input_file_path=None,
     kws['changepoints'] = config.items('Changepoints')
     if not kws['changepoints']: kws['changepoints'] = None 
     # remove unused command line args (value is None)
-    kwargs = {key: value for (key, value) in kwargs.iteritems() if value}
+    kwargs = {key: value for (key, value) in kwargs.items() if value}
     # override config file values using command line args
     kws.update(kwargs)
     # if user enters a single changepoint at command line, use it 

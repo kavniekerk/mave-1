@@ -1,3 +1,4 @@
+# mave/comparer.py
 """
 Quantifying the error between two arrays
 Passed values can be python lists, numpy arrays,
@@ -14,13 +15,13 @@ class Comparer(object):
         # extract unstandardized results ('y' field) 
         # from Dataset objects if passed as args instead of arrays
         try: 
-            self.c = np.array(comparison.y).astype(np.float)
+            self.c = np.array(comparison.y).astype(np.float64)
         except:
-            self.c = np.array(comparison).astype(np.float)
+            self.c = np.array(comparison).astype(np.float64)
         try:
-            self.b = np.array(baseline.y).astype(np.float)
+            self.b = np.array(baseline.y).astype(np.float64)
         except:    
-            self.b = np.array(baseline).astype(np.float)
+            self.b = np.array(baseline).astype(np.float64)
         # amount of data
         self.n = len(self.b)
         # average of measured data
@@ -90,5 +91,4 @@ if __name__=='__main__':
     b = np.ones(8759,)*(np.random.random_sample(8759,)+10.0)
     c = np.random.random_sample(8759,)+10.5
     comparer = Comparer(comparison=c, baseline=b)
-    print comparer
-
+    print(comparer)

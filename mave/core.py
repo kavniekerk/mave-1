@@ -1,3 +1,4 @@
+# mave/core.py
 """
 Building Energy Prediction
 
@@ -14,20 +15,20 @@ import pdb
 import csv
 import os
 import shutil
-import cPickle as pickle
+import pickle
 import dateutil.parser
 import numpy as np
 import pandas as pd
 import pprint
 from math import sqrt
 from datetime import datetime, timedelta
-from sklearn import preprocessing, cross_validation, metrics
-from holidays import holidays
-import trainers
-import comparer
-import dataset
-import visualize
-import location
+from sklearn import preprocessing, model_selection, metrics
+import mave.holidays
+import mave.trainers
+import mave.comparer
+import mave.dataset
+import mave.visualize
+import mave.location
 import logging
 log = logging.getLogger("mave.core")
 
@@ -47,7 +48,7 @@ class Preprocessor(object):
                  changepoints=None,
                  test_size=0.25,
                  datetime_column_name='LocalDateTime',
-                 holiday_keys=['USFederal'],
+                 holiday_keys=['US'],
                  dayfirst=False,
                  locale=None,
                  outside_db_column_name = 'OutsideDryBulbTemperature',
@@ -76,7 +77,17 @@ class Preprocessor(object):
         if use_holidays:
             self.feature_names.append('Holiday')
             for key in holiday_keys:
-                self.holidays = self.holidays.union(holidays[key])
+                try:
+                    # Use modern holidays API
+                    country_holidays = holidays.country_holidays(key)
+                    self.holidays = self.holidays.union(country_holidays.keys())
+                except AttributeError:
+                    # Fallback for older API or specific country codes
+                    if hasattr(holidays, key):
+                        country_holidays = getattr(holidays, key)()
+                        self.holidays = self.holidays.union(country_holidays.keys())
+                    else:
+                        log.warn(f"Holiday key '{key}' not recognized. Skipping.")
         # read in the input data
         data = pd.read_csv(input_file,
                            skiprows = n_headers,
@@ -86,8 +97,7 @@ class Preprocessor(object):
                            parse_dates = [self.datetime_column_name],
                            infer_datetime_format = True,
                            dayfirst=dayfirst,
-                           skipinitialspace = True,
-                           error_bad_lines = False)
+                           skipinitialspace = True)
         # drop columns with more than 50% nans
         data = data.dropna(axis = 'columns', thresh = int(0.5 * len(data)))
         data = data.to_records(index = False)
@@ -116,7 +126,7 @@ class Preprocessor(object):
 
         if locale and not outside_db_column_name in data.dtype.names:
             log.info(("No match found for outside air temperature"
-                      " name (%s) in the input file column headers: e%s."
+                      " name (%s) in the input file column headers: %s."
                       " Downloading for given location: %s"
                       %(outside_db_column_name,
                         data.dtype.names,
@@ -135,7 +145,7 @@ class Preprocessor(object):
                                       dtype=[(outside_dp_column_name,'f8')])
                 data=self.join_recarrays([data, outside_db, outside_dp])
                 self.use_tmy=True
-            except Exception, e:
+            except Exception as e:
                 log.warn(("Weather download unsuccessful. Fitting models "
                           "without weather data. TMY normalization will "
                           "also not be performed (even if requested)."))
@@ -197,12 +207,12 @@ class Preprocessor(object):
                 keep_inds *= y != 0.0
             # log outlier datetimes and values
             outliers = y[~keep_inds]
-            outlier_ts =  map(lambda l: str(l),datetimes[~keep_inds])
+            outlier_ts =  [str(l) for l in datetimes[~keep_inds]]
             if len(outliers) > 0:
                 log.warn(("Removed the following %s outlier value(s): "
                           "\n%s"
                           %(len(outliers),
-                            pprint.pformat(zip(outlier_ts,outliers)))))
+                            pprint.pformat(list(zip(outlier_ts,outliers))))))
                 X = X[keep_inds]
                 y = y[keep_inds]
                 datetimes = datetimes[keep_inds]
@@ -319,7 +329,7 @@ class Preprocessor(object):
             missing_intervals.append(('from ' + str(gap_start),
                                       'to ' + str(gap_end)))
             N = gap / median_interval - 1 # number of entries to add
-            for j in range(1, N+1):
+            for j in range(1, int(N)+1):
                 new_dt = gap_start + j*timedelta(seconds=median_interval)
                 new_row = np.array([(new_dt,) + (np.nan,) * (row_length - 1)],
                                                          dtype=data.dtype)
@@ -328,7 +338,7 @@ class Preprocessor(object):
                 dts_ind = np.argsort(dts)
                 data = data[dts_ind]
             dts = dts[dts_ind] # sorts datetimes
-            NN += N
+            NN += int(N)
         if len(missing_intervals) > 0:
             log.info(("Missing datetime interval(s) in input file:\n%s"
                       %pprint.pformat(missing_intervals)))
@@ -365,7 +375,7 @@ class Preprocessor(object):
     def changepoint_feature(self,
                             changepoints = None,
                             dayfirst = False,
-                            timestamp_format = '%Y-%m-%d%T%H%M',
+                            timestamp_format = '%%Y-%%m-%%d%%T%%H%%M',
                             **kwargs):
         if changepoints is not None:
             # convert timestamps to datetimes
@@ -392,8 +402,8 @@ class Preprocessor(object):
             self.X_standardizer = preprocessing.StandardScaler().fit(self.X)
         self.X_s = self.X_standardizer.transform(self.X)
         if self.y is not None:
-            self.y_standardizer = preprocessing.StandardScaler().fit(self.y)
-            self.y_s = self.y_standardizer.transform(self.y)
+            self.y_standardizer = preprocessing.StandardScaler().fit(self.y.reshape(-1, 1))
+            self.y_s = self.y_standardizer.transform(self.y.reshape(-1, 1)).ravel()
             if self.cps is not None:
                 pre_inds = np.where(self.cps == self.PRE_DATA_TAG)
                 post_inds = np.where(self.cps == self.POST_DATA_TAG)
@@ -407,8 +417,8 @@ class Preprocessor(object):
                 # to split into pre and post datasets.
                 # this is useful for testing the accuracy of modeling methods
                 # for datasets in which no retrofit is known to have occurred
-                pre = len(self.X_s)*(1-test_size)
-                post = len(self.X_s)*test_size
+                pre = int(len(self.X_s)*(1-test_size))
+                post = int(len(self.X_s)*test_size)
                 self.X_pre_s, self.X_post_s = self.X_s[:pre], self.X_s[pre:]
                 self.y_pre_s, self.y_post_s = self.y_s[:pre], self.y_s[pre:]
                 self.dts_pre, self.dts_post = self.dts[:pre], self.dts[pre:]
@@ -509,7 +519,7 @@ class ModelAggregator(object):
 
     def score(self):
         prediction = self.dataset.y_standardizer.inverse_transform(\
-                                      self.best_model.predict(self.dataset.X_s))
+                                      self.best_model.predict(self.dataset.X_s).reshape(-1, 1)).ravel()
         self.error_metrics = comparer.Comparer(comparison=prediction,\
                                                baseline=self.dataset.y)
         return self.error_metrics
@@ -518,12 +528,10 @@ class ModelAggregator(object):
         os.chdir(os.path.join(os.getcwd(),'models'))
         for m in self.models:
             m_name = str(m.best_estimator_).split('(')[0]
-            pickle.Pickler(
-                open(model_type+'_%s_model'%m_name,'wb'), -1).dump(
-                m.best_estimator_)
-        pickle.Pickler(
-            open(model_type+'_best_model_error_metrics.pkl','wb'), -1).dump(
-            self.error_metrics)
+            with open(model_type+'_%s_model'%m_name, 'wb') as f:
+                pickle.dump(m.best_estimator_, f, -1)
+        with open(model_type+'_best_model_error_metrics.pkl', 'wb') as f:
+            pickle.dump(self.error_metrics, f, -1)
         os.chdir('..')
         
 
@@ -537,7 +545,7 @@ class ModelAggregator(object):
             feats = self.dataset.feature_names
             rv += ("\nThe relative importances of input features are:\n%s"%
                   pprint.pformat([f+': '+str(i) for f,i in zip(feats,imps)]))
-        except Exception, e:
+        except Exception as e:
             rv += ""
         rv += "\n\n=== Fit to the training data ==="
         rv += "\nThese error metrics represent the match between the"+ \
@@ -581,22 +589,24 @@ class mave(object):
             self.locale = location.Location(address)
        
         # read up to the first 100 lines of the input_file to check columns 
-        f = open(input_file_path, 'Ur')
-        reader = csv.reader(f, delimiter=',')
-        headers = []
-        cols = None
-        for _ in range(100):
-            row = reader.next()
-            headers.append(row)
-            if len(row)>0:
-                if datetime_column_name in row:
-                    cols = [c for c in row \
-                            if not c in ignored_column_names \
-                            and c != '']
-                    log.info(("Ignoring the following columns named:%s"
-                              %ignored_column_names))
+        with open(input_file_path, 'r') as f:
+            reader = csv.reader(f, delimiter=',')
+            headers = []
+            cols = None
+            for _ in range(100):
+                try:
+                    row = next(reader)
+                    headers.append(row)
+                    if len(row)>0:
+                        if datetime_column_name in row:
+                            cols = [c for c in row \
+                                    if not c in ignored_column_names \
+                                    and c != '']
+                            log.info(("Ignoring the following columns named:%s"
+                                      %ignored_column_names))
+                            break
+                except StopIteration:
                     break
-        f.close()
         if cols is None:
             log.error(("Datetime column name %s not found in the input file"
                        ". Please either edit the input file or the config"
@@ -640,9 +650,7 @@ class mave(object):
                                  feature_names=self.p.feature_names,
                                  save=save)
         self.m_pre = ModelAggregator(dataset=self.A)
-        folds = cross_validation.KFold(len(self.A.X_s),
-                                       n_folds=k,
-                                       shuffle=True)
+        folds = model_selection.KFold(n_splits=k, shuffle=True)
         log.info("Fitting models to the pre-retrofit data")
         self.m_pre.train_all(k = folds, **kwargs)
         # single model (no weather lookup, no tmy normalization)
@@ -656,7 +664,8 @@ class mave(object):
         if save:
             self.m_pre.save('pre-retrofit')
             ofp = os.path.join('post-retrofit_error_metrics.pkl')
-            pickle.Pickler(open(ofp, 'wb'), -1).dump(self.DvsE)
+            with open(ofp, 'wb') as f:
+                pickle.dump(self.DvsE, f, -1)
         if self.locale and self.use_tmy:
             try:
                 use_dp = self.p.outside_dp_column_name in self.A.feature_names
@@ -666,21 +675,20 @@ class mave(object):
                              interp_interval=self.p.interval_seconds/60,
                              use_dp=use_dp,
                              save=True)
-                tmy_csv = open('./%s_TMY.csv'%self.locale.geocode,'Ur')
-            except e:
-                log.warn("TMY data download unsuccessful"%e)
+                with open('./%s_TMY.csv'%self.locale.geocode,'r') as tmy_csv:
+                    pass
+            except Exception as e:
+                log.warn("TMY data download unsuccessful: %s"%e)
                 self.use_tmy = False
         if self.locale and self.use_tmy:
             # build a second model based on the post-retrofit data
             self.m_post = ModelAggregator(dataset=self.D)
-            folds = cross_validation.KFold(len(self.D.X_s),
-                                           n_folds=k,
-                                           shuffle=True)
+            folds = model_selection.KFold(n_splits=k, shuffle=True)
             log.info("Fitting models to the post-retrofit data")
             self.m_post.train_all(k = folds, **kwargs)
             log.info("Preprocessing the TMY data file")
             tmy_cols = [c for c in cols if c != target_column_name]
-            self.p_tmy = Preprocessor(input_file=tmy_csv,
+            self.p_tmy = Preprocessor(input_file='./%s_TMY.csv'%self.locale.geocode,
                                       X_standardizer=self.p.X_standardizer,
                                       n_headers=0,
                                       column_names=tmy_cols,
@@ -702,11 +710,11 @@ class mave(object):
             self.GvsH = comparer.Comparer(comparison=self.H, baseline=self.G)
             if save:
                 self.m_post.save('post-retrofit')
-                pickle.Pickler(open('tmy_error_metrics.pkl', 'wb'), -1).dump(
-                                       self.GvsH)
+                with open('tmy_error_metrics.pkl', 'wb') as f:
+                    pickle.dump(self.GvsH, f, -1)
         if save:
             with open(os.path.join('text_results.txt'), "w") as f:
-                f.write(self.__str__())
+                f.write(str(self))
 
 
     def __str__(self):
@@ -730,16 +738,16 @@ class mave(object):
 
 if __name__=='__main__':
     import pdb
-    f = open('data/ex2.csv', 'Ur')
-    cps = [
-           ("2012/1/29 13:15", Preprocessor.PRE_DATA_TAG),
-           ("2012/12/20 01:15", Preprocessor.IGNORE_TAG),
-           ("2013/1/1 01:15", Preprocessor.PRE_DATA_TAG),
-           ("2013/9/14 23:15", Preprocessor.POST_DATA_TAG),
-          ]
-    # one example
-    mnv = mave(input_file=f,
-              changepoints=cps,
-              address=None,
-              save=True)
-    log.info(mnv)
+    with open('data/ex2.csv', 'r') as f:
+        cps = [
+               ("2012/1/29 13:15", Preprocessor.PRE_DATA_TAG),
+               ("2012/12/20 01:15", Preprocessor.IGNORE_TAG),
+               ("2013/1/1 01:15", Preprocessor.PRE_DATA_TAG),
+               ("2013/9/14 23:15", Preprocessor.POST_DATA_TAG),
+              ]
+        # one example
+        mnv = mave(input_file=f,
+                  changepoints=cps,
+                  address=None,
+                  save=True)
+        log.info(mnv)
